@@ -269,7 +269,6 @@ class Interface():
         self._link_indices.append(self._text.index('end-2l'))
 
 
-# pylint: disable=too-few-public-methods,too-many-instance-attributes
 class SuckORama():
     """
     Main application.
