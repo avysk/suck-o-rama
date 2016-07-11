@@ -12,7 +12,7 @@ from collections import namedtuple
 # Constants affecting rendering
 
 PLAIN_TEXT_PADDING = ' ' * 4
-VERSION = '-=[ Suck-O-Rama 0.1 ]=-        '
+VERSION = '-=[ Suck-O-Rama 0.3 ]=-        '
 
 
 def char_to_info(kind):
@@ -57,20 +57,23 @@ State = namedtuple('State',
                    ['kind', 'host', 'port', 'selector', 'data', 'c_index'])
 
 
-# pylint: disable=too-few-public-methods,too-many-instance-attributes
-class SuckORama():
+# pylint: disable=too-many-instance-attributes
+class Interface():
     """
-    Main application.
+    User interface.
     """
-    def __init__(self):
-        # Init GUI
+    def __init__(self, app):
+        self._app = app
+
+        # Root
         self._root = tk.Tk()
-        self._root.title("Suck-O-Rama")
+        self._root.title(VERSION)
         self._root.bind('<Up>', self._sel_up)
         self._root.bind('<Down>', self._sel_down)
-        self._root.bind('<Right>', self._go)
-        self._root.bind('<Left>', self._back)
+        self._root.bind('<Right>', app.jump)
+        self._root.bind('<Left>', app.back)
 
+        # Buttons
         self._icons = {}
         self._load_icons()
 
@@ -78,71 +81,90 @@ class SuckORama():
         self._frame.grid(row=0, column=1, sticky=tk.N+tk.S+tk.W+tk.E)
 
         for kind, cmd in [
-                ['HOME', self._cmd_home],
-                ['BACK', self._cmd_back],
-                ['RELOAD', self._cmd_reload]]:
+                ['HOME', app.cmd_home],
+                ['BACK', app.cmd_back],
+                ['RELOAD', app.cmd_reload]]:
             self._add_button(kind, cmd)
 
+        # Address line
+        self._addr_string = tk.StringVar(self._root, name='addr')
+        ttk.Label(self._root, textvariable='addr').grid(
+            row=1, column=1, sticky=tk.N+tk.S+tk.E)
+        self.addr = ''
+
+        # Main text widget and scrollbar
         fnt = font.Font(family='Cousine', size=12)
         self._text = tk.Text(self._root, width=80, height=35, font=fnt)
         scroll = ttk.Scrollbar(self._root, command=self._text.yview)
         scroll.grid(row=2, column=0, sticky=tk.N+tk.S+tk.W+tk.E)
-
-        self._addr_string = tk.StringVar(self._root, name='addr')
-        ttk.Label(self._root, textvariable='addr').grid(
-            row=1, column=1, sticky=tk.N+tk.S+tk.E)
-        self._addr = ''
-
         self._text.configure(yscrollcommand=scroll.set,
                              background='white', foreground='black')
         self._text.grid(row=2, column=1, sticky=tk.N+tk.S+tk.W+tk.E)
-
-        self._root.columnconfigure(2, weight=1)
-        self._root.rowconfigure(2, weight=1)
-
+        # We do not need bulit-in mouse event with selection etc.
+        # TO DO: actually, we may want selection.
         self._text.bind('<1>', lambda event: 'break')
         self._text.bind('<B1-Motion>', lambda event: 'break')
         self._text.focus()
         self._text['state'] = 'disabled'
 
+        # Tags
+        self._tags = ['active_link', 'dir', 'error', 'item', 'unknown']
+        for tag in self._tags:
+            self._text.tag_add(tag, '0.0', '0.0')
+        self._text.tag_configure('error', foreground='red')
+        self._text.tag_configure('dir', foreground='blue')
+        self._text.tag_configure('item', foreground='green')
+        self._text.tag_bind('dir', '<1>', self._select_entry)
+        self._text.tag_bind('item', '<1>', self._select_entry)
+        self._text.tag_bind('dir', '<Double-Button-1>', self._app.jump)
+        self._text.tag_bind('item', '<Double-Button-1>', self._app.jump)
+
+        # Status line
         self._label_status = tk.StringVar(self._root, name='status')
         ttk.Label(self._root, textvariable='status').grid(
             row=3, column=1, sticky=tk.N+tk.S+tk.W+tk.E)
-        self._status = ''
+        self.status = ''
 
-        # Init chosen item
-        self._controls = []
-        self._c_lines = []
+        # Resize only text area
+        self._root.columnconfigure(2, weight=1)
+        self._root.rowconfigure(2, weight=1)
 
-        # Init history
-        self._history = []
-
-        # Init state
-        self._state = None
+        # Indices of 'link' lines
+        self._link_indices = []
 
     @property
-    def _status(self):
+    def status(self):
+        """
+        Get status string.
+        """
         txt = self._label_status.get()[len(VERSION):]
         if txt.startswith(' '):
             txt = txt[1:]
         return txt
 
-    @_status.setter
-    def _status(self, val):
+    @status.setter
+    def status(self, val):
+        """
+        Set status string.
+        """
         txt = VERSION
         if len(val) > 0:
             txt += ' ' + val
         self._label_status.set(txt)
 
     @property
-    def _addr(self):
+    def addr(self):
+        """
+        Get address string.
+        """
         return self._addr_string.get()
 
-    @_addr.setter
-    def _addr(self, val):
+    @addr.setter
+    def addr(self, val):
+        """
+        Set address string.
+        """
         self._addr_string.set(val)
-
-    # Misc init-GUI stuff
 
     def _load_icons(self):
         self._icons['HOME'] = tk.PhotoImage(data=HOME)
@@ -154,7 +176,112 @@ class SuckORama():
                          command=cmd, takefocus=False)
         btn.pack(side=tk.LEFT)
 
-    # Entry point
+    # Methods to bind keys
+
+    def _sel_up(self, event):
+        logging.debug('_sel_up: %s', str(event))
+        self._update_sel(-1)
+
+    def _sel_down(self, event):
+        logging.debug('_sel_down: %s', str(event))
+        self._update_sel(1)
+
+    def _update_sel(self, delta):
+        total = len(self._link_indices)
+        if total:
+            self._app.cind += delta
+            self._app.cind %= total
+            self.update_control()
+
+    # Methods to bind tags
+
+    def _select_entry(self, event):
+        coord = self._text.index('@{},{}'.format(event.x, event.y))
+        self._app.cind = self._link_indices.index(coord.split('.')[0] + '.0')
+        self.update_control()
+        return 'break'
+
+    # Public interface
+
+    def update_control(self):
+        """
+        Mark active link according to self._app.cind.
+        """
+        self._text['state'] = 'normal'
+        start = self._link_indices[self._app.cind]
+        self._text.see(start)
+        end = start + ' + 6c'
+        self._text.tag_remove('active_link', '0.0', 'end')
+        self._text.tag_add('active_link', start, end)
+        self._text.tag_configure('active_link', background='yellow')
+        self._text['state'] = 'disable'
+
+    def clear_all(self):
+        """
+        Clear text widget and other stuff.
+        """
+        self.status = ''
+        self.addr = ''
+        self._link_indices = []
+        self._text['state'] = 'normal'
+        for tag in self._tags:
+            self._text.tag_remove(tag, '0.0', 'end')
+        self._text.delete('0.0', 'end')
+        self._text.update()
+        self._text['state'] = 'disabled'
+
+    def enable_updates(self):
+        """
+        Allow updates to text.
+        """
+        self._text['state'] = 'normal'
+
+    def disable_updates(self):
+        """
+        Disallow updates to text.
+        """
+        self._text['state'] = 'disabled'
+
+    def insert_with_tag(self, txt, idx1, idx2, tag):
+        """
+        Insert given text and apply given tag between indices.
+        """
+        self._text.insert('end', txt)
+        self._text.tag_add(tag, idx1, idx2)
+
+    def insert(self, txt):
+        """
+        Insert given text.
+        """
+        self._text.insert('end', txt)
+
+    def insert_with_padding(self, txt_list):
+        """
+        Insert lines from given list, with padding.
+        """
+        for line in txt_list:
+            self._text.insert('end', PLAIN_TEXT_PADDING + line + '\n')
+
+    def add_link_idx(self):
+        """
+        Store the index of the last added line.
+        """
+        self._link_indices.append(self._text.index('end-2l'))
+
+
+# pylint: disable=too-few-public-methods,too-many-instance-attributes
+class SuckORama():
+    """
+    Main application.
+    """
+    def __init__(self):
+        self._ui = Interface(self)
+        # Init chosen item
+        self._c_lines = []
+        # Init history
+        self._history = []
+        # Init state
+        self._state = None
 
     def run(self, host, port, selector):
         """
@@ -167,16 +294,16 @@ class SuckORama():
 
     # Main operations
 
-    def _go(self, event):
+    def jump(self, event):
         """
         Go to next page according to chosen control.
         """
         logging.debug('_go: %s', str(event))
         if not self._c_lines:
             return
-        cline = self._c_lines[self._state.c_index[0]]
+        cline = self._c_lines[self.cind]
         fields = cline.split('\t')
-        # XXX
+        # TO DO
         kind = fields[0][0]
         selector = fields[1]
         host = fields[2]
@@ -192,7 +319,7 @@ class SuckORama():
         host = self._state.host
         port = self._state.port
         selector = self._state.selector
-        self._cind = 0
+        self.cind = 0
         callback = self._update(kind)
         get_data(host, port, selector, callback)
 
@@ -205,7 +332,10 @@ class SuckORama():
             renderer()
         return _callback
 
-    def _back(self, event):
+    def back(self, event):
+        """
+        Go to the previous page in history.
+        """
         logging.debug('_back: %s', str(event))
         if len(self._history) == 0:
             return
@@ -220,68 +350,34 @@ class SuckORama():
                 '1': self._render_dir}[kind]
 
     @property
-    def _cind(self):
+    def cind(self):
+        """
+        Get index of selected link.
+        """
         idx = self._state.c_index
         return idx and idx[0]
 
-    @_cind.setter
-    def _cind(self, new):
+    @cind.setter
+    def cind(self, new):
+        """
+        Set the index of selected link.
+        """
         idx = self._state.c_index
         if idx:
             idx[0] = new
         else:
             idx.append(new)
 
-    def _select_entry(self, event):
-        coord = self._text.index('@{},{}'.format(event.x, event.y))
-        self._cind = self._controls.index(coord.split('.')[0] + '.0')
-        self._update_control()
-        return 'break'
-
-    # GUI methods
-
-    def _clear_all(self):
-        """
-        Clear text widget and other stuff.
-        """
-        self._status = ''
-        self._addr = ''
-        self._text['state'] = 'normal'
-        for tag in ['choose', 'dir', 'error', 'item']:
-            self._text.tag_remove(tag, '0.0', 'end')
-        self._text.delete('0.0', 'end')
-        self._text.update()
-        self._text['state'] = 'disabled'
-
-    def _sel_up(self, event):
-        logging.debug('_sel_up: %s', str(event))
-        self._update_sel(-1)
-
-    def _sel_down(self, event):
-        logging.debug('_sel_down: %s', str(event))
-        self._update_sel(1)
-
-    def _update_sel(self, delta):
-        total = len(self._c_lines)
-        if total:
-            self._cind += delta
-            self._cind %= total
-            self._update_control()
-
-    # Renderers
-
     def _render_text(self):
         """
         Render kind '0' documents (= plain text).
         """
-        self._sanitize_text()
+        self._sanitize_data()
         self._c_lines = []
-        self._controls = []
-        self._clear_all()
-        self._addr = 'TEXT: {}:{}{}'.format(self._state.host,
-                                            self._state.port,
-                                            self._state.selector)
-        self._text['state'] = 'normal'
+        self._ui.clear_all()
+        self._ui.addr = 'TEXT: {}:{}{}'.format(self._state.host,
+                                               self._state.port,
+                                               self._state.selector)
         logging.debug(self._state.data)
         got_lastline = False
         # Check for error message
@@ -291,17 +387,18 @@ class SuckORama():
                 fields = maybe.split('\t')
                 if len(fields) >= 4:
                     error = fields[0][1:]
-                self._text.insert('end', '[SERVER ERROR] ')
-                self._text.tag_add('error', '0.0', 'end -1c')
-                self._text.tag_configure('error', foreground='red')
-                self._text.insert('end', error + '\n')
+                self._ui.enable_updates()
+                self._ui.insert_with_tag('[SERVER ERROR] ',
+                                         '0.0', 'end-1c', 'error')
+                self._ui.insert(error + '\n')
                 if len(self._state.data) > 1:
-                    self._status += '[TRAILING DATA OMITTED]'
-                self._text['state'] = 'disabled'
+                    self._ui.status += '[TRAILING DATA OMITTED]'
+                self._ui.disable_updates()
                 return
+        to_render = []
         for line in self._state.data:
             if got_lastline:
-                self._status += '[TRAILING DATA OMITTED]'
+                self._ui.status += '[TRAILING DATA OMITTED]'
                 break
             if line == '.':
                 got_lastline = True
@@ -311,12 +408,14 @@ class SuckORama():
                 # to strip it back
                 if line == '..':
                     line = '.'
-                self._text.insert('end', PLAIN_TEXT_PADDING + line + '\n')
+                to_render.append(line)
         if not got_lastline:
-            self._status += '[POSSIBLY INCOMPLETE]'
-        self._text['state'] = 'disabled'
+            self._ui.status += '[POSSIBLY INCOMPLETE]'
+        self._ui.enable_updates()
+        self._ui.insert_with_padding(to_render)
+        self._ui.disable_updates()
 
-    def _sanitize_text(self):
+    def _sanitize_data(self):
         """
         Split text into lines by '\n'.
         """
@@ -330,83 +429,77 @@ class SuckORama():
         Render kind '1' documents (= gopher directory).
         """
         self._c_lines = []
-        self._controls = []
-        self._clear_all()
-        self._addr = 'DIR: {}:{}{}'.format(self._state.host,
-                                           self._state.port,
-                                           self._state.selector)
+        self._ui.clear_all()
+        self._ui.addr = 'DIR: {}:{}{}'.format(self._state.host,
+                                              self._state.port,
+                                              self._state.selector)
         # FIXME
         # Maybe we got bad server, which sends us the data separated by
         # '\n' and not by '\r\n'
-        self._sanitize_text()
-        self._text['state'] = 'normal'
+        self._sanitize_data()
         logging.debug(self._state.data)
         got_end = False
         trailing = False
+        self._ui.enable_updates()
         for line in self._state.data:
             if got_end:
-                self._status += '[TRAILING DATA OMITTED]'
+                self._ui.status += '[TRAILING DATA OMITTED]'
                 got_end = False
                 trailing = True
             if line == '.':
                 got_end = True
                 continue
             if line == '':
+                # TO DO shouldn't we produce '\n'?
                 continue
+
+            kind = line[0]
+            tag = {'1': 'dir', '0': 'item'}.get(kind, 'unknown')
+
             try:
                 tab = line.index('\t')
             except ValueError:
                 tab = None
+            out = char_to_info(kind)
             if tab:
-                self._text.insert('end', char_to_info(line[0]) + line[1:tab])
+                out += line[1:tab]
             else:
-                self._text.insert('end', char_to_info(line[0]) + line[1:])
-            self._text.insert('end', '\n')
-            if line[0] == '1':
-                self._text.tag_add('dir', 'end -2 lines', 'end -2c')
-                self._controls.append(self._text.index('end - 2 lines'))
-                self._c_lines.append(line)
-            elif line[0] == '0':
-                self._text.tag_add('item', 'end -2 lines', 'end -2c')
-                self._controls.append(self._text.index('end - 2 lines'))
+                out += line[1:]
+            out += '\n'
+            self._ui.insert_with_tag(out, 'end-2l', 'end-2c', tag)
+            if kind in {'0', '1'}:
+                self._ui.add_link_idx()
                 self._c_lines.append(line)
         if not trailing and not got_end:
-            self._status += '[POSSIBLY INCOMPLETE]'
-        self._text.tag_configure('dir', foreground='blue')
-        self._text.tag_configure('item', foreground='green')
-        self._text.tag_bind('dir', '<1>', self._select_entry)
-        self._text.tag_bind('item', '<1>', self._select_entry)
-        self._text.tag_bind('dir', '<Double-Button-1>', self._go)
-        self._text.tag_bind('item', '<Double-Button-1>', self._go)
-        self._text['state'] = 'disabled'
-        if self._controls:
-            if not self._cind:
-                self._cind = 0
-            self._update_control()
-
-    def _update_control(self):
-        self._text['state'] = 'normal'
-        start = self._controls[self._cind]
-        self._text.see(start)
-        end = start + ' + 6c'
-        self._text.tag_remove('choose', '0.0', 'end')
-        self._text.tag_add('choose', start, end)
-        self._text.tag_configure('choose', background='yellow')
-        self._text['state'] = 'disable'
+            self._ui.status += '[POSSIBLY INCOMPLETE]'
+        self._ui.disable_updates()
+        if self._c_lines:
+            if not self.cind:
+                self.cind = 0
+            self._ui.update_control()
 
     # Button commands
 
-    def _cmd_home(self):
+    def cmd_home(self):
+        """
+        Return to the start page.
+        """
         if self._history:
             del self._history[1:]
-            self._back("whatever")
-        self._cind = 0
-        self._update_control()
+            self.back("whatever")
+        self.cind = 0
+        self._ui.update_control()
 
-    def _cmd_back(self):
-        self._back("whatever")
+    def cmd_back(self):
+        """
+        Go back to previous page.
+        """
+        self.back("whatever")
 
-    def _cmd_reload(self):
+    def cmd_reload(self):
+        """
+        Reload current page.
+        """
         self._render_from_network()
 
 if __name__ == '__main__':
